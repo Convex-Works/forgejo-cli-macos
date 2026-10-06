@@ -8,8 +8,9 @@ build workflow; it is not a source mirror or an upstream project.
 ## How releases stay current
 
 The [GitHub Actions workflow](.github/workflows/release.yml) checks Codeberg
-daily for the newest stable `vX.Y.Z` tag. If its macOS build has not been
-published yet, an Apple Silicon runner checks out that tag, builds with the
+when the build recipe changes and daily for the newest stable `vX.Y.Z` tag.
+If its macOS build has not been published yet, an Apple Silicon runner checks
+out that tag, builds with the
 upstream release feature, verifies the binary, and publishes an archive and
 SHA-256 checksum as a GitHub Release. Re-running the workflow is safe because
 it skips tags that already have a release.

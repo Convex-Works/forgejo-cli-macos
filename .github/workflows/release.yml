@@ -1,6 +1,8 @@
 name: Build macOS Apple Silicon release
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '23 6 * * *'
   workflow_dispatch:
