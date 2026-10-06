@@ -33,3 +33,20 @@ public repositories after 60 days without repository activity. Check the
 Actions page periodically; if the schedule is disabled, enable it again and
 run the workflow manually. For a strict hands-off guarantee, an external
 scheduler can trigger the workflow through GitHub's API.
+
+## Optional external scheduler
+
+[cron-job.org](https://cron-job.org/) is a free, open source hosted scheduler
+that can send a custom HTTP request. To use it, create a fine-grained GitHub
+token limited to this repository with **Actions: write** permission. Configure
+a daily job with:
+
+- URL: `https://api.github.com/repos/Convex-Works/forgejo-cli-macos/actions/workflows/release.yml/dispatches`
+- Method: `POST`
+- Headers: `Authorization: Bearer YOUR_TOKEN`, `Accept: application/vnd.github+json`, and `Content-Type: application/json`
+- Body: `{"ref":"main"}`
+
+The token is stored by the scheduler, so scope it to this repository and rotate
+it when it expires. Keep it in the Authorization header, never in the URL. Once
+the external job is tested, the GitHub `schedule` trigger can be removed; the
+workflow's `workflow_dispatch` trigger must remain.
