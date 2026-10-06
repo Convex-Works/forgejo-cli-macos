@@ -1,0 +1,151 @@
+name: Build macOS Apple Silicon release
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional upstream tag to build, such as v0.6.0'
+        required: false
+        type: string
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.upstream.outputs.tag }}
+      build: ${{ steps.existing.outputs.build }}
+    steps:
+      - name: Find the newest stable upstream tag
+        id: upstream
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          upstream=https://codeberg.org/forgejo-contrib/forgejo-cli.git
+
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            tag=$REQUESTED_TAG
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            git ls-remote --exit-code --tags --refs "$upstream" "refs/tags/$tag" >/dev/null
+          else
+            tag=$(
+              git ls-remote --tags --refs "$upstream" 'refs/tags/v*' |
+                sed -nE 's#.*refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' |
+                sort -V |
+                tail -n 1
+            )
+          fi
+
+          [[ -n "$tag" ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Selected upstream tag: $tag"
+
+      - name: Check whether this build is already published
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          archive="forgejo-cli-$TAG-aarch64-apple-darwin.tar.gz"
+          if release=$(gh release view "macos-$TAG" --json isDraft,assets 2>/dev/null) && \
+            jq -e --arg archive "$archive" '
+              (.isDraft | not) and
+              ([.assets[].name] | index($archive) != null) and
+              ([.assets[].name] | index($archive + ".sha256") != null)
+            ' <<< "$release" >/dev/null; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "macos-$TAG is already published"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.build == 'true'
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact upstream tag
+        shell: bash
+        env:
+          TAG: ${{ needs.discover.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git clone --quiet https://codeberg.org/forgejo-contrib/forgejo-cli.git source
+          git -C source checkout --quiet --detach "refs/tags/$TAG"
+          echo "UPSTREAM_SHA=$(git -C source rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build and verify the arm64 binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable
+          cd source
+          BUILD_TYPE='release ci' cargo build --locked --release --features update-check
+          test "$(uname -m)" = arm64
+          file target/release/fj | grep -q 'Mach-O 64-bit executable arm64'
+          ./target/release/fj --help >/dev/null
+
+      - name: Package binary, licenses, and checksum
+        shell: bash
+        env:
+          TAG: ${{ needs.discover.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="forgejo-cli-$TAG-aarch64-apple-darwin.tar.gz"
+          tar -czf "dist/$archive" \
+            -C "$PWD/source/target/release" fj \
+            -C "$PWD/source" LICENSE-APACHE LICENSE-MIT
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.discover.outputs.tag }}
+        run: |
+          set -euo pipefail
+          archive="forgejo-cli-$TAG-aarch64-apple-darwin.tar.gz"
+          cat > release-notes.md <<EOF
+          Unofficial Apple Silicon build of forgejo-cli $TAG.
+
+          Upstream source: https://codeberg.org/forgejo-contrib/forgejo-cli/src/tag/$TAG
+          Upstream commit: $UPSTREAM_SHA
+          Build: cargo build --locked --release --features update-check
+
+          GitHub's automatic source archives contain this packaging repository. The application source is hosted on Codeberg.
+          EOF
+          release_tag="macos-$TAG"
+          if draft=$(gh release view "$release_tag" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$draft" != true ]]; then
+              echo "A published release exists but its assets are incomplete: $release_tag" >&2
+              exit 1
+            fi
+            gh release upload "$release_tag" \
+              "dist/$archive" "dist/$archive.sha256" --clobber
+            gh release edit "$release_tag" \
+              --title "forgejo-cli $TAG for macOS Apple Silicon" \
+              --notes-file release-notes.md --draft=false --latest
+          else
+            gh release create "$release_tag" \
+              "dist/$archive" "dist/$archive.sha256" \
+              --title "forgejo-cli $TAG for macOS Apple Silicon" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA" \
+              --latest
+          fi
